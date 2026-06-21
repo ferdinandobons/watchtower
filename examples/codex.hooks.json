@@ -1,0 +1,52 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash|apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "watchtower hook codex",
+            "timeout": 5,
+            "statusMessage": "Watchtower is observing the event"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "watchtower hook codex",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "watchtower hook codex",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "watchtower hook codex",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

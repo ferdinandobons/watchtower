@@ -1,0 +1,70 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "watchtower",
+            "args": ["hook", "claude-code"],
+            "timeout": 5,
+            "statusMessage": "Watchtower is observing the event"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "watchtower",
+            "args": ["hook", "claude-code"],
+            "timeout": 5,
+            "statusMessage": "Watchtower is checking the failure pattern"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "watchtower",
+            "args": ["hook", "claude-code"],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "watchtower",
+            "args": ["hook", "claude-code"],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "watchtower",
+            "args": ["hook", "claude-code"],
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
