@@ -26,6 +26,7 @@ def _env_int(name: str, default: int) -> int:
 @dataclass(frozen=True, slots=True)
 class Settings:
     db_path: Path = Path("~/.watchtower/watchtower.db").expanduser()
+    checkpoints_dir: Path = Path("~/.watchtower/checkpoints").expanduser()
     host: str = "127.0.0.1"
     port: int = 8765
     capture_commands: bool = False
@@ -38,6 +39,9 @@ class Settings:
         return cls(
             db_path=Path(
                 os.getenv("WATCHTOWER_DB_PATH", "~/.watchtower/watchtower.db")
+            ).expanduser(),
+            checkpoints_dir=Path(
+                os.getenv("WATCHTOWER_CHECKPOINTS_DIR", "~/.watchtower/checkpoints")
             ).expanduser(),
             host=os.getenv("WATCHTOWER_HOST", "127.0.0.1"),
             port=_env_int("WATCHTOWER_PORT", 8765),

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import sqlite3
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
@@ -8,15 +7,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from watchtower.models import Intervention, WatchtowerEvent
-
-
-def _iso(value: datetime) -> str:
-    return value.isoformat()
+from watchtower import store_checkpoints, store_events, store_feedback, store_interventions
+from watchtower.migrations import MIGRATIONS, apply_migrations
+from watchtower.models import ContextCheckpoint, Intervention, InterventionFeedback, WatchtowerEvent
 
 
 class SQLiteStore:
-    """Small SQLite event store. A new connection is used for every operation."""
+    """Small SQLite event store with explicit, forward-only migrations."""
 
     def __init__(self, path: Path | str) -> None:
         self.path = Path(path).expanduser()
@@ -45,118 +42,27 @@ class SQLiteStore:
 
     def _initialise(self) -> None:
         with self._connection() as connection:
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS events (
-                    id TEXT PRIMARY KEY,
-                    occurred_at TEXT NOT NULL,
-                    received_at TEXT NOT NULL,
-                    source TEXT NOT NULL,
-                    kind TEXT NOT NULL,
-                    session_id TEXT NOT NULL,
-                    project_path TEXT,
-                    fingerprint TEXT,
-                    sensitivity TEXT NOT NULL,
-                    payload_json TEXT NOT NULL
-                );
+            apply_migrations(connection)
 
-                CREATE INDEX IF NOT EXISTS idx_events_time
-                    ON events(occurred_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_events_session_time
-                    ON events(session_id, occurred_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_events_project_time
-                    ON events(project_path, occurred_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_events_fingerprint_time
-                    ON events(fingerprint, occurred_at DESC);
-
-                CREATE TABLE IF NOT EXISTS interventions (
-                    id TEXT PRIMARY KEY,
-                    created_at TEXT NOT NULL,
-                    detector TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    message TEXT NOT NULL,
-                    severity TEXT NOT NULL,
-                    session_id TEXT NOT NULL,
-                    project_path TEXT,
-                    scope_key TEXT NOT NULL,
-                    subject_fingerprint TEXT NOT NULL,
-                    evidence_event_ids_json TEXT NOT NULL,
-                    suggested_action TEXT,
-                    status TEXT NOT NULL
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_interventions_time
-                    ON interventions(created_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_interventions_detector_scope
-                    ON interventions(detector, scope_key, subject_fingerprint, created_at DESC);
-                """
-            )
-
-    def append_event(self, event: WatchtowerEvent) -> bool:
-        with self._connection() as connection:
-            cursor = connection.execute(
-                """
-                INSERT OR IGNORE INTO events (
-                    id, occurred_at, received_at, source, kind, session_id,
-                    project_path, fingerprint, sensitivity, payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    event.id,
-                    _iso(event.occurred_at),
-                    _iso(event.received_at),
-                    event.source,
-                    event.kind,
-                    event.session_id,
-                    event.project_path,
-                    event.fingerprint,
-                    event.sensitivity,
-                    json.dumps(event.payload, ensure_ascii=False, separators=(",", ":")),
-                ),
-            )
-            return cursor.rowcount == 1
-
-    def append_intervention(self, intervention: Intervention) -> None:
-        with self._connection() as connection:
-            connection.execute(
-                """
-                INSERT INTO interventions (
-                    id, created_at, detector, title, message, severity, session_id,
-                    project_path, scope_key, subject_fingerprint,
-                    evidence_event_ids_json, suggested_action, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    intervention.id,
-                    _iso(intervention.created_at),
-                    intervention.detector,
-                    intervention.title,
-                    intervention.message,
-                    intervention.severity,
-                    intervention.session_id,
-                    intervention.project_path,
-                    intervention.scope_key,
-                    intervention.subject_fingerprint,
-                    json.dumps(intervention.evidence_event_ids, separators=(",", ":")),
-                    intervention.suggested_action,
-                    intervention.status,
-                ),
-            )
-
-    def get_intervention(self, intervention_id: str) -> Intervention | None:
+    def schema_version(self) -> int:
         with self._connection() as connection:
             row = connection.execute(
-                "SELECT * FROM interventions WHERE id = ?", (intervention_id,)
+                "SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations"
             ).fetchone()
-        return self._intervention_from_row(row) if row else None
+        return int(row["version"])
 
-    def update_intervention_status(self, intervention_id: str, status: str) -> bool:
-        with self._connection() as connection:
-            cursor = connection.execute(
-                "UPDATE interventions SET status = ? WHERE id = ?",
-                (status, intervention_id),
-            )
-            return cursor.rowcount == 1
+    @property
+    def latest_schema_version(self) -> int:
+        return MIGRATIONS[-1].version
+
+    def append_event(self, event: WatchtowerEvent) -> bool:
+        return store_events.append_event(self._connection, event)
+
+    def get_event(self, event_id: str) -> WatchtowerEvent | None:
+        return store_events.get_event(self._connection, event_id)
+
+    def get_events(self, event_ids: Iterable[str]) -> list[WatchtowerEvent]:
+        return store_events.get_events(self._connection, event_ids)
 
     def list_events(
         self,
@@ -171,40 +77,32 @@ class SQLiteStore:
         since: datetime | None = None,
         before: datetime | None = None,
     ) -> list[WatchtowerEvent]:
-        clauses: list[str] = []
-        parameters: list[Any] = []
-        if source is not None:
-            clauses.append("source = ?")
-            parameters.append(source)
-        if kind is not None:
-            clauses.append("kind = ?")
-            parameters.append(kind)
-        if kinds:
-            ordered_kinds = sorted(kinds)
-            clauses.append(f"kind IN ({','.join('?' for _ in ordered_kinds)})")
-            parameters.extend(ordered_kinds)
-        if session_id is not None:
-            clauses.append("session_id = ?")
-            parameters.append(session_id)
-        if project_path is not None:
-            clauses.append("project_path = ?")
-            parameters.append(project_path)
-        if fingerprint is not None:
-            clauses.append("fingerprint = ?")
-            parameters.append(fingerprint)
-        if since is not None:
-            clauses.append("occurred_at >= ?")
-            parameters.append(_iso(since))
-        if before is not None:
-            clauses.append("occurred_at < ?")
-            parameters.append(_iso(before))
+        return store_events.list_events(
+            self._connection,
+            limit=limit,
+            source=source,
+            kind=kind,
+            kinds=kinds,
+            session_id=session_id,
+            project_path=project_path,
+            fingerprint=fingerprint,
+            since=since,
+            before=before,
+        )
 
-        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-        parameters.append(max(1, min(limit, 1000)))
-        query = f"SELECT * FROM events{where} ORDER BY occurred_at DESC LIMIT ?"
-        with self._connection() as connection:
-            rows = connection.execute(query, parameters).fetchall()
-        return [self._event_from_row(row) for row in rows]
+    def count_events(self) -> int:
+        return store_events.count_events(self._connection)
+
+    def append_intervention(self, intervention: Intervention) -> None:
+        store_interventions.append_intervention(self._connection, intervention)
+
+    def get_intervention(self, intervention_id: str) -> Intervention | None:
+        return store_interventions.get_intervention(self._connection, intervention_id)
+
+    def update_intervention_status(self, intervention_id: str, status: str) -> bool:
+        return store_interventions.update_intervention_status(
+            self._connection, intervention_id, status
+        )
 
     def list_interventions(
         self,
@@ -213,87 +111,77 @@ class SQLiteStore:
         detector: str | None = None,
         scope_key: str | None = None,
         subject_fingerprint: str | None = None,
+        session_id: str | None = None,
+        project_path: str | None = None,
         status: str | None = None,
         statuses: set[str] | None = None,
         since: datetime | None = None,
     ) -> list[Intervention]:
-        clauses: list[str] = []
-        parameters: list[Any] = []
-        if detector is not None:
-            clauses.append("detector = ?")
-            parameters.append(detector)
-        if scope_key is not None:
-            clauses.append("scope_key = ?")
-            parameters.append(scope_key)
-        if subject_fingerprint is not None:
-            clauses.append("subject_fingerprint = ?")
-            parameters.append(subject_fingerprint)
-        if status is not None:
-            clauses.append("status = ?")
-            parameters.append(status)
-        if statuses:
-            ordered_statuses = sorted(statuses)
-            clauses.append(f"status IN ({','.join('?' for _ in ordered_statuses)})")
-            parameters.extend(ordered_statuses)
-        if since is not None:
-            clauses.append("created_at >= ?")
-            parameters.append(_iso(since))
-
-        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-        parameters.append(max(1, min(limit, 1000)))
-        query = f"SELECT * FROM interventions{where} ORDER BY created_at DESC LIMIT ?"
-        with self._connection() as connection:
-            rows = connection.execute(query, parameters).fetchall()
-        return [self._intervention_from_row(row) for row in rows]
+        return store_interventions.list_interventions(
+            self._connection,
+            limit=limit,
+            detector=detector,
+            scope_key=scope_key,
+            subject_fingerprint=subject_fingerprint,
+            session_id=session_id,
+            project_path=project_path,
+            status=status,
+            statuses=statuses,
+            since=since,
+        )
 
     def count_interventions(
         self, *, since: datetime | None = None, statuses: Iterable[str] | None = None
     ) -> int:
-        clauses: list[str] = []
-        parameters: list[Any] = []
-        if since is not None:
-            clauses.append("created_at >= ?")
-            parameters.append(_iso(since))
-        if statuses:
-            ordered_statuses = sorted(set(statuses))
-            clauses.append(f"status IN ({','.join('?' for _ in ordered_statuses)})")
-            parameters.extend(ordered_statuses)
-        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-        with self._connection() as connection:
-            row = connection.execute(
-                f"SELECT COUNT(*) AS count FROM interventions{where}", parameters
-            ).fetchone()
-        return int(row["count"])
-
-    @staticmethod
-    def _event_from_row(row: sqlite3.Row) -> WatchtowerEvent:
-        return WatchtowerEvent(
-            id=row["id"],
-            occurred_at=row["occurred_at"],
-            received_at=row["received_at"],
-            source=row["source"],
-            kind=row["kind"],
-            session_id=row["session_id"],
-            project_path=row["project_path"],
-            fingerprint=row["fingerprint"],
-            sensitivity=row["sensitivity"],
-            payload=json.loads(row["payload_json"]),
+        return store_interventions.count_interventions(
+            self._connection, since=since, statuses=statuses
         )
 
-    @staticmethod
-    def _intervention_from_row(row: sqlite3.Row) -> Intervention:
-        return Intervention(
-            id=row["id"],
-            created_at=row["created_at"],
-            detector=row["detector"],
-            title=row["title"],
-            message=row["message"],
-            severity=row["severity"],
-            session_id=row["session_id"],
-            project_path=row["project_path"],
-            scope_key=row["scope_key"],
-            subject_fingerprint=row["subject_fingerprint"],
-            evidence_event_ids=json.loads(row["evidence_event_ids_json"]),
-            suggested_action=row["suggested_action"],
-            status=row["status"],
+    def upsert_feedback(self, feedback: InterventionFeedback) -> InterventionFeedback:
+        return store_feedback.upsert_feedback(self._connection, feedback)
+
+    def get_feedback(self, intervention_id: str) -> InterventionFeedback | None:
+        return store_feedback.get_feedback(self._connection, intervention_id)
+
+    def delete_feedback(self, intervention_id: str) -> bool:
+        return store_feedback.delete_feedback(self._connection, intervention_id)
+
+    def list_feedback(
+        self,
+        *,
+        limit: int = 100,
+        detector: str | None = None,
+        rating: str | None = None,
+    ) -> list[InterventionFeedback]:
+        return store_feedback.list_feedback(
+            self._connection, limit=limit, detector=detector, rating=rating
         )
+
+    def quality_metrics(self) -> dict[str, Any]:
+        return store_feedback.quality_metrics(self._connection)
+
+    def append_checkpoint(self, checkpoint: ContextCheckpoint) -> None:
+        store_checkpoints.append_checkpoint(self._connection, checkpoint)
+
+    def get_checkpoint(self, checkpoint_id: str) -> ContextCheckpoint | None:
+        return store_checkpoints.get_checkpoint(self._connection, checkpoint_id)
+
+    def get_checkpoint_for_intervention(self, intervention_id: str) -> ContextCheckpoint | None:
+        return store_checkpoints.get_checkpoint_for_intervention(self._connection, intervention_id)
+
+    def list_checkpoints(
+        self,
+        *,
+        limit: int = 100,
+        session_id: str | None = None,
+        project_path: str | None = None,
+    ) -> list[ContextCheckpoint]:
+        return store_checkpoints.list_checkpoints(
+            self._connection,
+            limit=limit,
+            session_id=session_id,
+            project_path=project_path,
+        )
+
+    def count_checkpoints(self) -> int:
+        return store_checkpoints.count_checkpoints(self._connection)

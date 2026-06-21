@@ -2,13 +2,13 @@
 
 **A local-first proactivity control plane for coding agents.**
 
-Watchtower does not try to replace Claude Code, Codex, or another coding agent. It observes their lifecycle events, detects when the work process has entered a risky or wasteful state, and surfaces an evidence-backed intervention at the useful moment.
+Watchtower does not try to replace Claude Code, Codex, or another coding agent. It observes lifecycle events, detects when the work process enters a risky or wasteful state, and surfaces an evidence-backed intervention at the useful moment.
 
-> Project status: early alpha. The current release is a working vertical slice with a local daemon, hook adapters, SQLite event storage, four deterministic detectors, an interruption policy, a dashboard, and tests. It does not execute remediation actions autonomously.
+> Project status: early alpha, version `0.2.0`. The repository contains a working local daemon, Claude Code and Codex hook adapters, a versioned SQLite schema, four deterministic detectors, a dashboard, structured feedback, safe hook installation, and confirmed local context checkpoints. It does not autonomously modify source files, run remediation commands, or launch another agent.
 
 ## The idea
 
-Most agent integrations answer a request. Watchtower explores a different primitive:
+Most agent integrations begin with a user request. Watchtower explores a different primitive:
 
 ```text
 agent activity
@@ -16,23 +16,25 @@ agent activity
     -> opportunity detection
     -> interruption policy
     -> grounded intervention
-    -> human decision
+    -> feedback or confirmed action
 ```
 
 The key product is not another model invocation. It is the layer that decides **when there is enough evidence to speak**.
 
-## Working MVP
+## What works today
 
-Watchtower currently detects:
+| Capability | Current behavior |
+| --- | --- |
+| `repeated_failure` | Detects the same failure signature at least three times in 20 minutes |
+| `verification_gap` | Detects an agent stopping after the latest test, lint, or type check failed |
+| `compaction_risk` | Detects context compaction while active evidence may be lost |
+| `agent_conflict` | Detects overlapping edits from different sessions in one project |
+| Hook installer | Structurally merges Claude Code or Codex hooks, creates backups, supports dry-run, and is idempotent |
+| Structured feedback | Stores useful, not useful, incorrect, early, late, known, disruptive, accepted, or rejected feedback locally |
+| Context checkpoint | After explicit confirmation, writes a deterministic Markdown handoff from retained events |
+| Local quality metrics | Aggregates feedback by detector without remote telemetry |
 
-| Detector | Trigger | Suggested response |
-| --- | --- | --- |
-| `repeated_failure` | The same failure signature appears at least three times in 20 minutes | Pause the strategy and launch an independent read-only review |
-| `verification_gap` | An agent stops after the latest test, lint, or type check failed | Reopen with the failed verification attached |
-| `compaction_risk` | Context compaction begins while active evidence may be lost | Create a structured checkpoint |
-| `agent_conflict` | Different sessions edit overlapping files in the same project | Review a cross-agent diff before continuing |
-
-Every intervention contains the detector, severity, project and session scope, evidence event IDs, and a proposed action. The first version only advises. It does not modify files, run commands, or start another agent without a future explicit approval flow.
+Every intervention contains a detector, severity, project and session scope, evidence event IDs, and a proposed action.
 
 ## Architecture
 
@@ -43,16 +45,18 @@ Claude Code hooks       Codex hooks       Canonical API
                              |
                      privacy reduction
                              |
-                     local SQLite store
+              versioned local SQLite store
                              |
                   deterministic detectors
                              |
                     interruption policy
                              |
-             hook message / desktop / dashboard
+       hook message / desktop / dashboard / feedback
+                             |
+           explicitly confirmed local checkpoint
 ```
 
-The adapters are intentionally thin. The detector engine depends on a canonical event schema rather than vendor-specific payloads.
+Vendor payloads are normalized before detector evaluation. Prompts, transcripts, screenshots, keystrokes, and full file contents are outside the default data model.
 
 ## Quick start
 
@@ -68,7 +72,15 @@ pip install -e ".[dev]"
 watchtower serve --no-notifications
 ```
 
-Open `http://127.0.0.1:8765`, then exercise the complete pipeline in another terminal:
+In a second terminal, inspect the hook changes before applying them:
+
+```bash
+watchtower install all --scope user --dry-run
+watchtower install all --scope user
+watchtower doctor
+```
+
+Open `http://127.0.0.1:8765`, then exercise the event and detector pipeline:
 
 ```bash
 watchtower demo
@@ -76,50 +88,96 @@ watchtower demo
 
 The demo sends three equivalent failed test events followed by a stop event. The dashboard should show a repeated-failure intervention and a failed-verification intervention.
 
-Useful commands:
+## Hook installation
+
+User-level installation:
 
 ```bash
-watchtower doctor
-watchtower hook claude-code < hook-payload.json
-watchtower hook codex < hook-payload.json
-python -m watchtower serve
+watchtower install claude-code --scope user
+watchtower install codex --scope user
+watchtower install all --scope user
 ```
 
-## Connect Claude Code
+Project-level installation:
 
-Claude Code command hooks receive lifecycle JSON on standard input. Merge [`examples/claude-code.settings.json`](examples/claude-code.settings.json) into either:
+```bash
+watchtower install all --scope project --project-dir /path/to/repository
+```
 
-- `~/.claude/settings.json` for all projects
-- `.claude/settings.json` for one repository
+Removal is symmetric and deletes only entries matching the Watchtower-managed hook definitions:
 
-The example forwards successful and failed tool calls, stop events, subagent completion, and pre-compaction events to the local daemon.
+```bash
+watchtower uninstall all --scope user --dry-run
+watchtower uninstall all --scope user
+```
 
-Official reference: https://code.claude.com/docs/en/hooks
+The installer:
 
-## Connect Codex
+- parses and merges existing JSON instead of replacing it;
+- preserves unrelated hooks and top-level settings;
+- does not duplicate existing Watchtower entries;
+- shows a unified diff;
+- creates a timestamped backup before every changed write;
+- writes atomically in the same directory;
+- refuses invalid JSON and symlinked configuration files;
+- preflights every target before an `all` operation;
+- attempts rollback if a later target fails.
 
-Copy or merge [`examples/codex.hooks.json`](examples/codex.hooks.json) into either:
+Claude Code user hooks are stored in `~/.claude/settings.json`. Codex user hooks are stored in `~/.codex/hooks.json`. Project scope uses the corresponding directory below the selected repository. Codex may require a trust review before project hooks run.
 
-- `~/.codex/hooks.json`
-- `.codex/hooks.json` inside a trusted repository
+The checked-in examples remain available at [`examples/claude-code.settings.json`](examples/claude-code.settings.json) and [`examples/codex.hooks.json`](examples/codex.hooks.json).
 
-Codex emits `PostToolUse` for supported Bash executions even when the command exits with a non-zero status, so Watchtower infers success or failure from the tool response. Codex asks the user to review and trust non-managed hook definitions before running them.
+## Feedback and quality metrics
 
-Official reference: https://developers.openai.com/codex/hooks
+The dashboard exposes quick `Useful` and `Not useful` actions plus detailed reasons. Feedback is upserted by intervention, so it can be changed later. No feedback leaves the local daemon.
+
+```text
+PUT    /v1/interventions/{id}/feedback
+DELETE /v1/interventions/{id}/feedback
+GET    /v1/feedback
+GET    /v1/metrics/quality
+```
+
+The current metrics report total, positive, and negative feedback plus per-detector rates. They are descriptive local aggregates, not a claim of model accuracy.
+
+## Confirmed context checkpoints
+
+A `compaction_risk` intervention proposes `create_context_checkpoint`. The dashboard can execute that narrow action after a browser confirmation. The CLI requires `--yes`:
+
+```bash
+watchtower checkpoint \
+  --session-id SESSION_ID \
+  --intervention-id INTERVENTION_ID \
+  --yes
+```
+
+Checkpoints are Markdown files stored under `~/.watchtower/checkpoints` by default. They contain only retained Watchtower evidence:
+
+- session and source metadata;
+- changed-file names;
+- successful and failed verification summaries;
+- currently open verification errors;
+- observed event counts;
+- the linked intervention and proposed next step;
+- evidence event IDs;
+- an explicit list of data Watchtower did not acquire.
+
+Checkpoint identity is derived from the evidence set, making repeated requests for the same intervention idempotent. Files are written atomically with restrictive permissions and verified by SHA-256 when read. Watchtower does not write checkpoints into the source repository and does not commit them.
 
 ## Privacy defaults
 
-Watchtower is designed to start with the smallest useful event surface:
-
 - The daemon binds to `127.0.0.1` by default.
-- Data is written to `~/.watchtower/watchtower.db`.
-- Hook payloads are reduced before storage.
+- Events and interventions are stored in `~/.watchtower/watchtower.db`.
+- Checkpoints are stored in `~/.watchtower/checkpoints`.
+- Hook payloads are reduced before persistence.
 - Full commands are not stored by default.
 - Common credentials and bearer tokens are redacted.
 - Error excerpts are bounded and marked as content-bearing events.
-- Conversation transcripts are not read.
+- Conversation transcripts and user prompts are not read.
 - Screenshots and keystrokes are not captured.
-- Hook forwarding fails open when the daemon is unavailable, so an outage does not stop the coding agent.
+- Hook forwarding fails open when the daemon is unavailable.
+- Feedback and quality metrics remain local.
+- Checkpoint creation requires explicit confirmation.
 
 Command capture is an explicit opt-in:
 
@@ -127,15 +185,12 @@ Command capture is an explicit opt-in:
 watchtower serve --capture-commands
 ```
 
-Review the privacy model before using that option in a sensitive repository.
-
 ## Configuration
-
-Environment variables:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `WATCHTOWER_DB_PATH` | `~/.watchtower/watchtower.db` | SQLite database path |
+| `WATCHTOWER_CHECKPOINTS_DIR` | `~/.watchtower/checkpoints` | Local checkpoint directory |
 | `WATCHTOWER_HOST` | `127.0.0.1` | Daemon bind address |
 | `WATCHTOWER_PORT` | `8765` | Daemon port |
 | `WATCHTOWER_URL` | derived from host and port | URL used by hook commands |
@@ -146,43 +201,32 @@ Environment variables:
 
 ## HTTP API
 
-The daemon exposes:
-
 ```text
 GET    /health
 POST   /v1/hooks/{source}
 POST   /v1/events
 GET    /v1/events
+GET    /v1/events/{id}
 GET    /v1/interventions
 PATCH  /v1/interventions/{id}/status
+PUT    /v1/interventions/{id}/feedback
+DELETE /v1/interventions/{id}/feedback
+GET    /v1/feedback
+GET    /v1/metrics/quality
+GET    /v1/metrics/summary
+POST   /v1/checkpoints
+GET    /v1/checkpoints
+GET    /v1/checkpoints/{id}/content
 GET    /
 ```
 
-FastAPI also exposes interactive API documentation at `/docs`.
+FastAPI exposes interactive API documentation at `/docs`.
 
-A canonical event looks like:
-
-```json
-{
-  "source": "codex",
-  "kind": "verification.failed",
-  "session_id": "session-123",
-  "project_path": "/workspace/project",
-  "fingerprint": "failure_4be8bde7c8b8a78c21df41d0",
-  "sensitivity": "content",
-  "payload": {
-    "tool_name": "Bash",
-    "verification_key": "pytest",
-    "error": "FAILED tests/test_auth.py:<line>"
-  }
-}
-```
-
-See [`docs/event-schema.md`](docs/event-schema.md) for the contract.
+See [`docs/event-schema.md`](docs/event-schema.md), [`docs/architecture.md`](docs/architecture.md), [`docs/installation.md`](docs/installation.md), and [`docs/checkpoints.md`](docs/checkpoints.md).
 
 ## Add a detector
 
-A detector is a small deterministic component:
+A detector remains a small deterministic component:
 
 ```python
 from watchtower.models import Intervention, WatchtowerEvent
@@ -222,25 +266,30 @@ make lint
 make run
 ```
 
-The test suite covers privacy reduction, vendor payload normalization, detector behavior, interruption budgets, storage idempotency, API ingestion, and hook output.
+The current suite contains 37 tests covering privacy reduction, vendor normalization, detector behavior, interruption budgets, migrations, storage idempotency, feedback, hook installation, checkpoint integrity, API ingestion, and hook output.
+
+## Compatibility status
+
+The adapters and installer are tested against versioned synthetic fixtures and the documented configuration shapes in this repository. A matrix of real client versions has not yet been published. See [`docs/compatibility.md`](docs/compatibility.md) for the explicit support status and validation backlog.
 
 ## Direction
 
 The next milestones are:
 
-1. Produce structured context checkpoints before compaction.
-2. Create cross-agent handoffs that can be reviewed before injection.
-3. Package native Claude Code and Codex installation flows.
-4. Record explicit user feedback on every intervention.
-5. Add replayable event fixtures and a benchmark for intervention precision.
-6. Introduce confirmed action adapters, starting with read-only reviewer launches.
-7. Extract the generic detector and policy layer as a proactivity runtime SDK.
+1. Capture and anonymize real hook fixtures from released Claude Code and Codex clients.
+2. Add retention, export, purge, and database backup commands.
+3. Separate detector candidates from policy decisions and record suppression reasons.
+4. Add an evidence detail view with detector thresholds and policy explanations.
+5. Build a replay harness and public intervention benchmark.
+6. Add a capability-gated action contract, starting with read-only reviewer launches.
+7. Package daemon lifecycle management for macOS, Linux, and Windows.
+8. Extract the generic detector and policy layer as a proactivity runtime SDK.
 
 The long-term objective is a model-independent, open event layer that lets software become proactive without surrendering user control.
 
 ## Contributing and security
 
-Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a change. Report security and privacy issues through the process in [`SECURITY.md`](SECURITY.md), not in a public issue.
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a change. Report security and privacy issues through [`SECURITY.md`](SECURITY.md), not in a public issue.
 
 ## License
 

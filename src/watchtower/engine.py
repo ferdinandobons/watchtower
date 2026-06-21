@@ -11,7 +11,7 @@ from watchtower.detectors import (
     VerificationGapDetector,
 )
 from watchtower.detectors.base import Detector
-from watchtower.models import ProcessingResult, WatchtowerEvent
+from watchtower.models import Intervention, ProcessingResult, WatchtowerEvent
 from watchtower.notifier import DesktopNotifier
 from watchtower.policy import InterruptionPolicy
 from watchtower.store import SQLiteStore
@@ -29,14 +29,14 @@ class WatchtowerEngine:
         notifier: DesktopNotifier | None = None,
     ) -> None:
         self.store = store
-        self.detectors = list(
-            detectors
-            or [
-                RepeatedFailureDetector(),
-                VerificationGapDetector(),
-                CompactionRiskDetector(),
-                AgentConflictDetector(),
-            ]
+        default_detectors: list[Detector] = [
+            RepeatedFailureDetector(),
+            VerificationGapDetector(),
+            CompactionRiskDetector(),
+            AgentConflictDetector(),
+        ]
+        self.detectors: list[Detector] = (
+            list(detectors) if detectors is not None else default_detectors
         )
         self.policy = policy or InterruptionPolicy()
         self.notifier = notifier or DesktopNotifier(enabled=False)
@@ -48,7 +48,7 @@ class WatchtowerEngine:
             if not accepted:
                 return ProcessingResult(accepted=False, event=event, interventions=[])
 
-            emitted = []
+            emitted: list[Intervention] = []
             for detector in self.detectors:
                 try:
                     candidates = detector.evaluate(event, self.store)

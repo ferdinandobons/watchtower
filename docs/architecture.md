@@ -1,10 +1,10 @@
 # Architecture
 
-Watchtower is split into six boundaries so that perception, interruption policy, and agent execution do not collapse into one opaque model call.
+Watchtower separates perception, opportunity detection, interruption policy, presentation, feedback, and confirmed action execution. The separation prevents the system from collapsing into one opaque model call.
 
 ## 1. Event sources
 
-The first adapters consume lifecycle events from Claude Code and Codex. Future sources may include Git, test runners, editor diagnostics, CI, and local activity tools.
+The first adapters consume lifecycle events from Claude Code and Codex. Future sources may include Git, test runners, editor diagnostics, CI, and explicitly authorized local activity tools.
 
 Vendor payloads must not enter detector code directly.
 
@@ -16,29 +16,34 @@ Before persistence, the adapter:
 
 - keeps a bounded allowlist of scalar metadata;
 - classifies common test, lint, and type-check commands;
-- extracts changed file names without storing file contents;
+- extracts changed-file names without storing file contents;
 - redacts common credential formats;
 - stores full command text only when explicitly enabled;
 - creates stable failure fingerprints after removing volatile values.
 
-The transcript path supplied by agent hooks is ignored.
+Transcript paths supplied by agent hooks are ignored.
 
-## 3. Local event store
+## 3. Versioned local store
 
-SQLite is the initial event log and intervention log. It provides:
+SQLite stores events, accepted interventions, structured feedback, and context-checkpoint metadata. Forward-only migrations are recorded in `schema_migrations`.
+
+The store provides:
 
 - idempotent event ingestion;
 - time-window queries;
 - session and project scopes;
 - failure-fingerprint lookup;
 - detector cooldown lookup;
-- intervention status tracking.
+- intervention status tracking;
+- one modifiable feedback record per intervention;
+- local quality aggregation;
+- checkpoint identity and integrity metadata.
 
-SQLite keeps the first implementation inspectable and easy to replay. A vector database is not required for the deterministic MVP.
+A vector database is not required for the deterministic alpha.
 
 ## 4. Detectors
 
-A detector evaluates one newly accepted event against prior local evidence. It returns zero or more candidate interventions.
+A detector evaluates one newly accepted event against prior local evidence and returns zero or more candidate interventions.
 
 Detectors should:
 
@@ -55,28 +60,41 @@ The engine catches detector exceptions so one experimental detector does not sto
 
 The policy decides whether a valid candidate is allowed to reach the user. The current policy enforces a global hourly budget. Detector-specific cooldowns prevent repeated alerts for the same subject.
 
-Future policies may include:
+Candidate and policy-decision persistence are not yet separate. This remains a prerequisite for precise suppression metrics.
 
-- focus and meeting state;
-- quiet hours;
-- per-project thresholds;
-- learned user preferences;
-- severity-sensitive channels;
-- a cost model for interruption.
+## 6. Presentation and feedback
 
-This layer is deliberately separate from the detectors. A condition can be true while the correct action is still to remain silent.
-
-## 6. Presentation and future actions
-
-An accepted intervention is stored and may be surfaced through:
+An accepted intervention may be surfaced through:
 
 - hook `systemMessage` output;
 - an operating-system notification;
 - the local web dashboard.
 
-The current implementation does not start agents or change files. Future action adapters should require explicit confirmation, use narrow permissions, and append their result to the event log.
+The dashboard records local structured feedback. Feedback is not transmitted remotely.
 
-## Processing path
+## 7. Confirmed context checkpoint
+
+`create_context_checkpoint` is the first narrow action. It is intentionally not a generic process-execution framework.
+
+The action:
+
+- requires explicit API, dashboard, or CLI confirmation;
+- reads only retained Watchtower records;
+- writes only below the configured Watchtower checkpoint directory;
+- creates deterministic Markdown;
+- records evidence IDs and a SHA-256 digest;
+- verifies path containment and integrity when read;
+- never edits source files or creates Git commits.
+
+Future actions require a capability model, preview, approval, timeout, and audit contract before entering the core.
+
+## 8. Hook installation boundary
+
+The installer operates outside the daemon. It performs a structured JSON merge, preserves unrelated configuration, produces a diff, creates a backup, and atomically replaces the destination.
+
+Configuration files that are malformed or symlinked are rejected. Multi-target operations are preflighted before the first write.
+
+## Event processing path
 
 ```text
 POST /v1/hooks/{source}
@@ -88,7 +106,7 @@ bounded JSON reader
 source adapter and privacy reduction
         |
         v
-append canonical event to SQLite
+append canonical event to versioned SQLite
         |
         v
 run deterministic detectors
@@ -100,16 +118,21 @@ apply detector cooldown and interruption budget
 persist intervention and notify
         |
         v
-return evidence-backed result to hook
+record optional local feedback
+        |
+        v
+execute only an explicitly confirmed narrow action
 ```
 
 ## Core invariants
 
 - Local by default.
-- No transcript reading.
+- No transcript or prompt reading.
 - No screenshot or keystroke collection.
 - No command storage without opt-in.
-- No autonomous remediation in the initial release.
 - Every intervention names its evidence events.
 - Hook forwarding fails open when the daemon is unavailable.
 - Vendor integrations remain replaceable adapters.
+- Feedback remains local.
+- Checkpoint writing requires explicit confirmation.
+- No generic project command execution in the alpha.

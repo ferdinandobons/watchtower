@@ -7,7 +7,8 @@ from watchtower.store import SQLiteStore
 
 
 class Detector(Protocol):
-    name: str
+    @property
+    def name(self) -> str: ...
 
     def evaluate(self, event: WatchtowerEvent, store: SQLiteStore) -> list[Intervention]: ...
 

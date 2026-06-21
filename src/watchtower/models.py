@@ -11,6 +11,19 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+FeedbackRating = Literal[
+    "useful",
+    "not_useful",
+    "incorrect",
+    "too_early",
+    "too_late",
+    "already_known",
+    "too_disruptive",
+    "action_accepted",
+    "action_rejected",
+]
+
+
 class WatchtowerEvent(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -42,6 +55,33 @@ class Intervention(BaseModel):
     evidence_event_ids: list[str] = Field(default_factory=list)
     suggested_action: str | None = None
     status: Literal["new", "acknowledged", "dismissed", "resolved"] = "new"
+
+
+class InterventionFeedback(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(default_factory=lambda: f"fb_{uuid4().hex}")
+    intervention_id: str
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    rating: FeedbackRating
+    comment: str | None = Field(default=None, max_length=2000)
+    channel: str = Field(default="dashboard", min_length=1, max_length=64)
+    detector: str
+    detector_version: str = "1"
+
+
+class ContextCheckpoint(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    created_at: datetime = Field(default_factory=utc_now)
+    session_id: str
+    project_path: str | None = None
+    intervention_id: str | None = None
+    path: str
+    sha256: str
+    evidence_event_ids: list[str] = Field(default_factory=list)
 
 
 class ProcessingResult(BaseModel):

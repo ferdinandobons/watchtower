@@ -9,6 +9,7 @@ test:
 lint:
 	ruff check .
 	ruff format --check .
+	mypy src/watchtower
 
 format:
 	ruff check --fix .

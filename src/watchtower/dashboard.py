@@ -28,9 +28,7 @@ def dashboard_html() -> str:
       margin: 0;
       min-height: 100vh;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background:
-        radial-gradient(circle at 18% 0%, rgba(62, 160, 220, .13), transparent 32rem),
-        var(--bg);
+      background: radial-gradient(circle at 18% 0%, rgba(62, 160, 220, .13), transparent 32rem), var(--bg);
       color: var(--text);
     }
     header {
@@ -48,7 +46,7 @@ def dashboard_html() -> str:
     .live { display: flex; align-items: center; gap: 8px; color: var(--ok); font-size: 13px; white-space: nowrap; }
     .dot { width: 9px; height: 9px; background: var(--ok); border-radius: 50%; box-shadow: 0 0 0 5px rgba(125, 227, 178, .11); }
     main { max-width: 1180px; margin: 0 auto; padding: 14px 24px 60px; }
-    .stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }
+    .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }
     .stat, .panel { border: 1px solid var(--border); background: rgba(16, 20, 29, .9); border-radius: 16px; }
     .stat { padding: 18px; }
     .stat-label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
@@ -71,19 +69,24 @@ def dashboard_html() -> str:
     .title { font-size: 15px; font-weight: 720; line-height: 1.35; }
     .message { color: #c0c8d5; font-size: 13px; line-height: 1.55; margin-top: 7px; }
     .meta { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; margin-top: 10px; overflow-wrap: anywhere; }
-    .actions { display: flex; gap: 7px; margin-top: 12px; }
-    button { color: var(--text); background: #20293a; border: 1px solid #33405a; border-radius: 8px; padding: 7px 10px; cursor: pointer; font: inherit; font-size: 11px; }
-    button:hover { border-color: var(--accent); }
+    .actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 12px; }
+    button, select { color: var(--text); background: #20293a; border: 1px solid #33405a; border-radius: 8px; padding: 7px 10px; cursor: pointer; font: inherit; font-size: 11px; }
+    button:hover, select:hover { border-color: var(--accent); }
+    button.selected { border-color: var(--ok); color: var(--ok); }
+    button.danger.selected { border-color: var(--critical); color: var(--critical); }
+    details { margin-top: 11px; color: var(--muted); font-size: 11px; }
+    details summary { cursor: pointer; }
     .event { padding: 12px 10px; border-bottom: 1px solid rgba(38, 48, 68, .65); }
     .event:last-child { border-bottom: 0; }
     .event-kind { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--accent); overflow-wrap: anywhere; }
     .event-source { color: var(--muted); font-size: 11px; margin-top: 5px; }
     footer { max-width: 1180px; margin: 0 auto; padding: 0 24px 28px; color: var(--muted); font-size: 12px; }
+    @media (max-width: 900px) { .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
     @media (max-width: 820px) {
       header { align-items: flex-start; flex-direction: column; }
-      .stats { grid-template-columns: 1fr; }
       .grid { grid-template-columns: 1fr; }
     }
+    @media (max-width: 520px) { .stats { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -99,11 +102,12 @@ def dashboard_html() -> str:
     <section class="stats">
       <div class="stat"><div class="stat-label">Events observed</div><div class="stat-value" id="event-count">0</div></div>
       <div class="stat"><div class="stat-label">Open interventions</div><div class="stat-value" id="open-count">0</div></div>
-      <div class="stat"><div class="stat-label">Active detectors</div><div class="stat-value">4</div></div>
+      <div class="stat"><div class="stat-label">Useful feedback</div><div class="stat-value" id="useful-rate">—</div></div>
+      <div class="stat"><div class="stat-label">Checkpoints</div><div class="stat-value" id="checkpoint-count">0</div></div>
     </section>
     <section class="grid">
       <div class="panel">
-        <div class="panel-head"><h2>Interventions</h2><span>High-signal opportunities only</span></div>
+        <div class="panel-head"><h2>Interventions</h2><span>Evidence, feedback and confirmed actions</span></div>
         <div class="items" id="interventions"><div class="empty">No interventions yet. Run <code>watchtower demo</code> to exercise the pipeline.</div></div>
       </div>
       <div class="panel">
@@ -112,7 +116,7 @@ def dashboard_html() -> str:
       </div>
     </section>
   </main>
-  <footer>Commands are not stored unless command capture is explicitly enabled.</footer>
+  <footer>Feedback and checkpoints stay local. Commands are not stored unless command capture is explicitly enabled.</footer>
   <script>
     const esc = value => String(value ?? '').replace(/[&<>'"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
     const ago = value => {
@@ -121,44 +125,106 @@ def dashboard_html() -> str:
       if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
       return `${Math.floor(seconds / 3600)}h ago`;
     };
+    let interventionById = {};
+    let feedbackByIntervention = {};
+
     async function setStatus(id, status) {
       await fetch(`/v1/interventions/${encodeURIComponent(id)}/status`, {
         method: 'PATCH', headers: {'content-type':'application/json'}, body: JSON.stringify({status})
       });
       await refresh();
     }
+    async function setFeedback(id, rating) {
+      if (!rating) return;
+      await fetch(`/v1/interventions/${encodeURIComponent(id)}/feedback`, {
+        method: 'PUT', headers: {'content-type':'application/json'},
+        body: JSON.stringify({rating, channel: 'dashboard'})
+      });
+      await refresh();
+    }
+    async function createCheckpoint(id) {
+      const item = interventionById[id];
+      if (!item) return;
+      if (!window.confirm('Create a local Markdown checkpoint from retained Watchtower events?')) return;
+      const response = await fetch('/v1/checkpoints', {
+        method: 'POST', headers: {'content-type':'application/json'},
+        body: JSON.stringify({
+          session_id: item.session_id,
+          project_path: item.project_path,
+          intervention_id: item.id,
+          confirmed: true
+        })
+      });
+      const body = await response.json();
+      if (!response.ok) {
+        window.alert(body.detail || 'Checkpoint creation failed');
+        return;
+      }
+      window.alert(`Checkpoint created locally:\n${body.path}`);
+      await refresh();
+    }
     function renderInterventions(items) {
       const root = document.getElementById('interventions');
       const open = items.filter(item => item.status === 'new');
-      document.getElementById('open-count').textContent = open.length;
+      interventionById = Object.fromEntries(items.map(item => [item.id, item]));
       if (!items.length) {
         root.innerHTML = '<div class="empty">No interventions yet. Run <code>watchtower demo</code> to exercise the pipeline.</div>';
         return;
       }
-      root.innerHTML = items.map(item => `
-        <article class="card">
-          <div class="topline"><span class="badge ${esc(item.severity)}">${esc(item.severity)}</span><span class="time">${ago(item.created_at)}</span></div>
-          <div class="title">${esc(item.title)}</div>
-          <div class="message">${esc(item.message)}</div>
-          <div class="meta">${esc(item.detector)} · ${esc(item.session_id)}${item.suggested_action ? ` · ${esc(item.suggested_action)}` : ''}</div>
-          ${item.status === 'new' ? `<div class="actions"><button onclick="setStatus('${esc(item.id)}','acknowledged')">Acknowledge</button><button onclick="setStatus('${esc(item.id)}','dismissed')">Dismiss</button></div>` : `<div class="meta">Status: ${esc(item.status)}</div>`}
-        </article>`).join('');
+      root.innerHTML = items.map(item => {
+        const feedback = feedbackByIntervention[item.id];
+        const useful = feedback?.rating === 'useful' ? 'selected' : '';
+        const notUseful = feedback?.rating === 'not_useful' ? 'selected' : '';
+        const evidence = (item.evidence_event_ids || []).map(id => `<code>${esc(id)}</code>`).join(', ');
+        const checkpoint = item.suggested_action === 'create_context_checkpoint'
+          ? `<button onclick="createCheckpoint('${esc(item.id)}')">Create checkpoint</button>` : '';
+        return `
+          <article class="card">
+            <div class="topline"><span class="badge ${esc(item.severity)}">${esc(item.severity)}</span><span class="time">${ago(item.created_at)}</span></div>
+            <div class="title">${esc(item.title)}</div>
+            <div class="message">${esc(item.message)}</div>
+            <div class="meta">${esc(item.detector)} · ${esc(item.session_id)}${item.suggested_action ? ` · ${esc(item.suggested_action)}` : ''}</div>
+            <details><summary>Evidence (${(item.evidence_event_ids || []).length})</summary><div class="meta">${evidence || 'No evidence IDs retained'}</div></details>
+            <div class="actions">
+              <button class="${useful}" onclick="setFeedback('${esc(item.id)}','useful')">Useful</button>
+              <button class="danger ${notUseful}" onclick="setFeedback('${esc(item.id)}','not_useful')">Not useful</button>
+              <select aria-label="Detailed feedback" onchange="setFeedback('${esc(item.id)}', this.value); this.selectedIndex=0">
+                <option value="">More feedback…</option>
+                <option value="incorrect">Incorrect</option>
+                <option value="too_early">Too early</option>
+                <option value="too_late">Too late</option>
+                <option value="already_known">Already known</option>
+                <option value="too_disruptive">Too disruptive</option>
+              </select>
+              ${checkpoint}
+              ${item.status === 'new' ? `<button onclick="setStatus('${esc(item.id)}','acknowledged')">Acknowledge</button><button onclick="setStatus('${esc(item.id)}','dismissed')">Dismiss</button>` : `<button disabled>${esc(item.status)}</button>`}
+            </div>
+          </article>`;
+      }).join('');
     }
     function renderEvents(items) {
       const root = document.getElementById('events');
-      document.getElementById('event-count').textContent = items.length;
       if (!items.length) { root.innerHTML = '<div class="empty">Waiting for agent hooks.</div>'; return; }
       root.innerHTML = items.slice(0, 24).map(item => `
         <div class="event"><div class="event-kind">${esc(item.kind)}</div><div class="event-source">${esc(item.source)} · ${esc(item.session_id)} · ${ago(item.occurred_at)}</div></div>`).join('');
     }
     async function refresh() {
       try {
-        const [health, interventions, events] = await Promise.all([
+        const [health, interventions, events, feedback, metrics, summary] = await Promise.all([
           fetch('/health').then(r => r.json()),
           fetch('/v1/interventions?limit=50').then(r => r.json()),
-          fetch('/v1/events?limit=200').then(r => r.json())
+          fetch('/v1/events?limit=200').then(r => r.json()),
+          fetch('/v1/feedback?limit=1000').then(r => r.json()),
+          fetch('/v1/metrics/quality').then(r => r.json()),
+          fetch('/v1/metrics/summary').then(r => r.json())
         ]);
-        document.getElementById('health').textContent = `Daemon ${health.version} online`;
+        document.getElementById('health').textContent = `Daemon ${health.version} · schema ${health.schema_version}`;
+        feedbackByIntervention = Object.fromEntries(feedback.map(item => [item.intervention_id, item]));
+        const rate = metrics.overall?.positive_rate;
+        document.getElementById('useful-rate').textContent = rate == null ? '—' : `${Math.round(rate * 100)}%`;
+        document.getElementById('event-count').textContent = summary.events;
+        document.getElementById('open-count').textContent = summary.open_interventions;
+        document.getElementById('checkpoint-count').textContent = summary.checkpoints;
         renderInterventions(interventions);
         renderEvents(events);
       } catch (error) {
